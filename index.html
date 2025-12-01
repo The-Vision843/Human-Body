@@ -1,0 +1,250 @@
+/*
+HumanBodyZoomToAtoms.jsx
+
+An interactive React component (single-file) that visualizes a simplified human body and lets
+you smoothly zoom in from the full body to cell/atom detail.
+
+Features:
+- Uses @react-three/fiber + @react-three/drei for a WebGL scene
+- Simplified humanoid built from primitive meshes (no external assets)
+- Level-of-detail (LOD) system: Body -> Organs -> Cells -> Atoms
+- Smooth camera zoom driven by a slider or mouse wheel
+- Instanced meshes for performance when rendering many cells/atoms
+
+Installation (for your project):
+npm install three @react-three/fiber @react-three/drei
+
+Usage:
+Import this component into a React app (Vite / Create React App / Next) and render it.
+
+Notes and limitations:
+- This is an illustrative educational demo, not an anatomically accurate model.
+- Atoms are stylized spheres; we simulate scale changes with camera and object LOD thresholds.
+
+*/
+
+import React, { useRef, useMemo, useState, useEffect } from "react";
+import { Canvas, useFrame, useThree } from "@react-three/fiber";
+import { OrbitControls, Html, Stats } from "@react-three/drei";
+
+// Utility: linear interpolation
+const lerp = (a, b, t) => a + (b - a) * t;
+
+// Camera controller that interpolates between zoom levels and switches visibility of layers
+function ZoomCamera({ zoom }) {
+  const { camera } = useThree();
+  // We'll map zoom [0,1] to camera position and fov for dramatic effect
+  useFrame(() => {
+    // camera positions for levels: far-body -> organs -> cells -> atoms
+    const z = lerp(20, 0.5, zoom); // camera moves much closer
+    const y = lerp(6, 1.2, zoom);
+    camera.position.lerp({ x: 0, y: y, z: z }, 0.08);
+    camera.fov = lerp(45, 30, zoom);
+    camera.updateProjectionMatrix();
+  });
+  return null;
+}
+
+// Simple humanoid constructed from primitives
+function Humanoid({ visible }) {
+  // visible bool toggles fade-in/out with scale
+  return (
+    <group visible={visible} position={[0, -1.5, 0]}> 
+      {/* torso */}
+      <mesh position={[0, 1.2, 0]} castShadow receiveShadow>
+        <boxGeometry args={[2, 3, 1]} />
+        <meshStandardMaterial roughness={0.6} metalness={0.0} />
+      </mesh>
+      {/* head */}
+      <mesh position={[0, 3, 0]}>
+        <sphereGeometry args={[0.6, 32, 32]} />
+        <meshStandardMaterial roughness={0.6} />
+      </mesh>
+      {/* arms */}
+      <mesh position={[1.8, 1.6, 0]} rotation={[0,0,0.2]}>
+        <cylinderGeometry args={[0.18,0.18,2.2,16]} />
+        <meshStandardMaterial />
+      </mesh>
+      <mesh position={[-1.8, 1.6, 0]} rotation={[0,0,-0.2]}>
+        <cylinderGeometry args={[0.18,0.18,2.2,16]} />
+        <meshStandardMaterial />
+      </mesh>
+      {/* legs */}
+      <mesh position={[0.6, -0.6, 0]}>
+        <cylinderGeometry args={[0.25,0.25,2.6,16]} />
+        <meshStandardMaterial />
+      </mesh>
+      <mesh position={[-0.6, -0.6, 0]}>
+        <cylinderGeometry args={[0.25,0.25,2.6,16]} />
+        <meshStandardMaterial />
+      </mesh>
+    </group>
+  );
+}
+
+// Organs layer: a few colored blobs
+function Organs({ visible }) {
+  return (
+    <group visible={visible} position={[0, -0.8, 0]}> 
+      <mesh position={[0, 1.4, 0.25]}> {/* heart-ish */}
+        <sphereGeometry args={[0.5, 24, 24]} />
+        <meshStandardMaterial emissive={[0.3,0.0,0.0]} />
+      </mesh>
+      <mesh position={[-0.6, 1.1, -0.2]}> {/* left lung */}
+        <sphereGeometry args={[0.6, 24, 24]} />
+        <meshStandardMaterial opacity={0.9} transparent />
+      </mesh>
+      <mesh position={[0.6, 1.1, -0.2]}> {/* right lung */}
+        <sphereGeometry args={[0.6, 24, 24]} />
+        <meshStandardMaterial opacity={0.9} transparent />
+      </mesh>
+    </group>
+  );
+}
+
+// Cells layer -- many instanced spheres inside torso region
+function Cells({ count = 500, zoom }) {
+  const meshRef = useRef();
+  const dummy = useMemo(() => new THREE.Object3D(), []);
+  const positions = useMemo(() => {
+    const p = [];
+    for (let i = 0; i < count; i++) {
+      // spawn inside an ellipsoid roughly in torso space
+      const rx = (Math.random() - 0.5) * 1.2;
+      const ry = Math.random() * 1.6 + 0.4;
+      const rz = (Math.random() - 0.5) * 0.6;
+      p.push([rx, ry, rz]);
+    }
+    return p;
+  }, [count]);
+
+  useFrame((state, delta) => {
+    // subtle pulse animation based on zoom
+    const sFactor = 0.9 + 0.2 * Math.sin(state.clock.elapsedTime * 0.5);
+    for (let i = 0; i < count; i++) {
+      const [x, y, z] = positions[i];
+      dummy.position.set(x, y, z);
+      const s = 0.03 * sFactor * (1 + 0.3 * Math.sin(i + state.clock.elapsedTime));
+      dummy.scale.set(s, s, s);
+      dummy.updateMatrix();
+      meshRef.current.setMatrixAt(i, dummy.matrix);
+    }
+    meshRef.current.instanceMatrix.needsUpdate = true;
+  });
+
+  // control visibility by zoom range; show when zoom > 0.35
+  const visible = zoom > 0.35;
+
+  return (
+    <instancedMesh ref={meshRef} args={[null, null, count]} visible={visible} castShadow>
+      <sphereGeometry args={[1, 8, 8]} />
+      <meshStandardMaterial roughness={0.7} metalness={0.0} />
+    </instancedMesh>
+  );
+}
+
+// Atoms layer -- many tiny spheres arranged inside a small 'cell' near camera focus
+function Atoms({ cells = 6, atomsPerCell = 180, zoom }) {
+  const meshRef = useRef();
+  const dummy = useMemo(() => new THREE.Object3D(), []);
+  const total = cells * atomsPerCell;
+
+  // Precompute positions for atoms by grouping them into cell clusters
+  const positions = useMemo(() => {
+    const pos = [];
+    for (let c = 0; c < cells; c++) {
+      // center each cell in a small grid around center
+      const cx = (c % 3 - 1) * 0.5;
+      const cy = Math.floor(c / 3) * 0.5 + 1.0;
+      const cz = 0;
+      for (let i = 0; i < atomsPerCell; i++) {
+        // spherical distribution around cell center
+        const r = Math.random() * 0.08 + 0.02;
+        const theta = Math.random() * Math.PI * 2;
+        const phi = Math.acos((Math.random() * 2) - 1);
+        const x = cx + r * Math.sin(phi) * Math.cos(theta);
+        const y = cy + r * Math.sin(phi) * Math.sin(theta);
+        const z = cz + r * Math.cos(phi);
+        pos.push([x, y, z]);
+      }
+    }
+    return pos;
+  }, [cells, atomsPerCell]);
+
+  useFrame((state) => {
+    for (let i = 0; i < total; i++) {
+      const [x, y, z] = positions[i];
+      dummy.position.set(x, y, z);
+      const s = 0.006 * (1 + 0.3 * Math.sin(i * 0.1 + state.clock.elapsedTime * 6));
+      dummy.scale.set(s, s, s);
+      dummy.updateMatrix();
+      meshRef.current.setMatrixAt(i, dummy.matrix);
+    }
+    meshRef.current.instanceMatrix.needsUpdate = true;
+  });
+
+  // Atoms visible only when zoom very close
+  const visible = zoom > 0.78;
+
+  return (
+    <instancedMesh ref={meshRef} args={[null, null, total]} visible={visible}>
+      <sphereGeometry args={[1, 6, 6]} />
+      <meshStandardMaterial emissive={[0.05,0.05,0.1]} roughness={0.5} metalness={0.0} />
+    </instancedMesh>
+  );
+}
+
+// HUD + Slider
+function Controls({ zoom, setZoom }) {
+  return (
+    <div className="absolute left-4 bottom-6 w-64 p-3 bg-white/70 rounded-lg backdrop-blur-sm">
+      <div className="text-sm font-semibold">Zoom level</div>
+      <input
+        type="range"
+        min={0}
+        max={1}
+        step={0.001}
+        value={zoom}
+        onChange={(e) => setZoom(Number(e.target.value))}
+        className="w-full"
+      />
+      <div className="text-xs mt-2">Tip: Use mouse wheel or drag to orbit. Slide to zoom from whole-body → atoms.</div>
+      <div className="flex gap-2 mt-2">
+        <button className="px-2 py-1 rounded bg-gray-800 text-white text-xs" onClick={() => setZoom(0)}>Body</button>
+        <button className="px-2 py-1 rounded bg-gray-800 text-white text-xs" onClick={() => setZoom(0.45)}>Cells</button>
+        <button className="px-2 py-1 rounded bg-gray-800 text-white text-xs" onClick={() => setZoom(0.9)}>Atoms</button>
+      </div>
+    </div>
+  );
+}
+
+// Main exported component
+export default function HumanBodyZoomToAtoms() {
+  const [zoom, setZoom] = useState(0); // 0..1
+
+  return (
+    <div style={{ width: "100%", height: "100vh", position: "relative" }}>
+      <Canvas shadows camera={{ position: [0, 6, 20], fov: 45 }}>
+        <ambientLight intensity={0.6} />
+        <directionalLight position={[10, 10, 5]} intensity={0.8} />
+        <pointLight position={[0, 4, 3]} intensity={0.4} />
+
+        <Suspense fallback={null}>
+          <ZoomCamera zoom={zoom} />
+
+          {/* Layers rendered in the same scene; each component decides its visible prop based on zoom */}
+          <Humanoid visible={zoom < 0.45} />
+          <Organs visible={zoom > 0.15 && zoom < 0.55} />
+          <Cells zoom={zoom} />
+          <Atoms zoom={zoom} />
+
+        </Suspense>
+
+        <OrbitControls enablePan={false} enableZoom={false} />
+        <Stats />
+      </Canvas>
+
+      <Controls zoom={zoom} setZoom={setZoom} />
+    </div>
+  );
+}
